@@ -498,7 +498,7 @@ timedp_complete_forest <- Baseline_var_imputed_miss$ximp
 
 ```
 
-### Without Frailty (Gaussian distribution)
+### Without Frailty
 ```{r}
 set.seed(2409)
 timedp_complete_forest1 <- subset(timedp_complete_forest, select = -c(PID))
