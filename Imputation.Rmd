@@ -58,6 +58,7 @@ Base_surv_analysis23.2 <- subset(Base_surv_analysis23_2,
 form3 = Surv(tstart, tstop, event) ~ .
 
 # Perform stepwise variable selection
+set.seed(0726)
 Time_Cyt_base_results.2 <- stepwise(formula=form3, 
                           data = Base_surv_analysis23.2,
                           type = "cox",
@@ -260,7 +261,7 @@ extractAIC(res4)
 
 ```{r}
 ### results from the fifth dataset
-set.seed(0727)
+set.seed(0726)
 dataset5.1 <-subset(dataset5, select = -c(PID, HIV, months))
 Results_data5 <- stepwise(formula = form3,
                           data =  dataset5.1,
@@ -500,7 +501,7 @@ timedp_complete_forest <- Baseline_var_imputed_miss$ximp
 
 ### Without Frailty
 ```{r}
-set.seed(2409)
+set.seed(0726)
 timedp_complete_forest1 <- subset(timedp_complete_forest, select = -c(PID))
 # Stepwise Cox regression
 timedp_base_imputed_forest <- stepwise(formula=form3, 
