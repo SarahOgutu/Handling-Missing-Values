@@ -443,7 +443,7 @@ pooled <- combined %>%
   summarise(
     pooled_coef = mean(Est),
     HR = exp(pooled_coef),
-    pooled_se = sqrt(mean(SE^2) + var(Est)),  # Rubin's rule for combining SEs
+    pooled_se = sqrt(mean(SE^2) + var(Est) + mean(SE^2)/5),  # Rubin's rule for combining SEs
     .groups = 'drop'
   )
 
