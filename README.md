@@ -6,6 +6,7 @@ The analyses were compared for imputed versus non-imputed datasets and the adjus
 2. Compare the imputation techniques
 3. Compare the analyses for the imputed vs non-imputed datasets
 ## Dataset
+The data (CAP004) used for this analysis was obtained from CAPRISA (https://www.caprisa.org/Pages/CAPRISAStudies).
 ## Paper
 ## Authors
 Sarah Ogutu, Mohanad Mohammed, Henry Mwambi
