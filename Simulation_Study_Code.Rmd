@@ -9,7 +9,7 @@ output:
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
+knitr::opts_chunk$set(echo = TRUE)
 ```
 
 ## Simulating the datasets
@@ -785,4 +785,5 @@ for (name in dataset_names1) {
 
 print(aic_results_forest_frailty)
 ```
+
 
