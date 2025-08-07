@@ -1,0 +1,788 @@
+---
+title: Simulation study for comparative analysis of imputation techniques MICE and
+  missForest
+author: "Sarah Ogutu"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
+```
+
+## Simulating the datasets
+
+```{r}
+# Load libraries
+library(dplyr)
+
+set.seed(2025)
+
+# Simulate baseline
+simulate_baseline <- function(n, label) {
+  PID <- 1:n
+
+  # Factor/binary variables (balanced)
+  bin1 <- factor(sample(c("primary", "highschool", "university"), 
+                        n, replace = TRUE)) # education level
+  bin2 <- factor(sample(c("yes", "no"), n, replace = TRUE)) # Smoking
+  bin3 <- factor(sample(c("yes", "no"), n, replace = TRUE)) # Salary
+  bin4 <- factor(sample(c("urban", "rural"), n, replace = TRUE)) # residence
+  bin5 <- factor(sample(c("single", "married", "divorced"), 
+                        n, replace = TRUE)) # Marital status
+
+  # Numeric variables (positive only)
+  num1 <- sample(0:50, n, replace = TRUE)       # number of partners
+  num2 <- sample(0:30, n, replace = TRUE)       # sexual intercourses/month
+  num3 <- sample(18:40, n, replace = TRUE)      # age at enrollment
+  num4 <- sample(1:10, n, replace = TRUE)       # household size
+  num5 <- sample(0:100, n, replace = TRUE)      # travel distance in km
+
+  # HIV time-to-event and status: ensure balanced event rate (~20–40%)
+  time_to_event <- rexp(n, rate = 0.1)
+  time_to_event <- pmin(time_to_event, 12)
+  HIV_status <- ifelse(time_to_event < 12, 1, 0)
+
+  # Re-draw until we get enough events (>50)
+  while (sum(HIV_status) < 50) {
+    time_to_event <- rexp(n, rate = 0.1)
+    time_to_event <- pmin(time_to_event, 12)
+    HIV_status <- ifelse(time_to_event < 12, 1, 0)
+  }
+
+  baseline <- data.frame(
+    PID,
+    bin1, bin2, bin3, bin4, bin5,
+    num1, num2, num3, num4, num5,
+    time_to_HIV = time_to_event,
+    HIV_status = HIV_status
+  )
+
+  assign(paste0("Base_", label), baseline, envir = .GlobalEnv)
+}
+
+# Simulate cytokines (positive, no extreme values)
+simulate_cytokines <- function(n, label) {
+  visits <- sample(1:10, n, replace = TRUE)
+  PID <- rep(1:n, times = visits)
+  followup_times <- lapply(visits, function(k) sort(runif(k, 1, 12)))
+
+  df <- data.frame(
+    PID = PID,
+    time = unlist(followup_times)
+  )
+
+  for (i in 1:20) {
+    # log-normal to keep values positive and moderately skewed
+    df[[paste0("cyto", i)]] <- round(rlnorm(nrow(df), meanlog = 2, sdlog = 0.3), 2)
+  }
+
+  assign(paste0("Cyt_", label), df, envir = .GlobalEnv)
+}
+
+# Simulate for all 3 datasets
+simulate_baseline(200, "n1")
+simulate_cytokines(200, "n1")
+
+simulate_baseline(800, "n2")
+simulate_cytokines(800, "n2")
+
+simulate_baseline(2000, "n3")
+simulate_cytokines(2000, "n3")
+
+```
+
+## Merging the datasets
+```{r}
+library(survival)
+library(dplyr)
+library(survival)
+library(dplyr)
+
+# Step 1: Set up event data
+base_n1_event <- Base_n1 %>%
+  select(PID, time_to_HIV, HIV_status)
+
+# Step 2: Create initial tmerge structure
+base_n1_tmerge <- tmerge(
+  data1 = base_n1_event,
+  data2 = base_n1_event,
+  id = PID,
+  tstop = time_to_HIV
+)
+
+# Step 3: Add 20 cytokines as time-dependent covariates
+for (i in 1:20) {
+  varname <- paste0("cyto", i)
+
+  # This is the proper way to use tdc() within tmerge
+  base_n1_tmerge <- tmerge(
+    data1 = base_n1_tmerge,
+    data2 = Cyt_n1,
+    id = PID,
+    temp = tdc(time, Cyt_n1[[varname]])
+  )
+  names(base_n1_tmerge)[names(base_n1_tmerge) == "temp"] <- varname
+}
+
+# Step 4: Add the event information
+base_n1_tmerge <- tmerge(
+  data1 = base_n1_tmerge,
+  data2 = base_n1_event,
+  id = PID,
+  event = event(time_to_HIV, HIV_status)
+)
+
+# Step 5: Merge static baseline covariates
+baseline_static <- Base_n1 %>%
+  select(-time_to_HIV, -HIV_status)
+
+Base_Cyt_n1 <- left_join(base_n1_tmerge, baseline_static, by = "PID")
+
+```
+
+```{r}
+process_tmerge <- function(base_df, cyt_df, label) {
+  base_event <- base_df %>%
+    select(PID, time_to_HIV, HIV_status)
+
+  tm <- tmerge(
+    data1 = base_event,
+    data2 = base_event,
+    id = PID,
+    tstop = time_to_HIV
+  )
+
+  for (i in 1:20) {
+    varname <- paste0("cyto", i)
+    tm <- tmerge(
+      data1 = tm,
+      data2 = cyt_df,
+      id = PID,
+      temp = tdc(time, cyt_df[[varname]])
+    )
+    names(tm)[names(tm) == "temp"] <- varname
+  }
+
+  tm <- tmerge(
+    data1 = tm,
+    data2 = base_event,
+    id = PID,
+    event = event(time_to_HIV, HIV_status)
+  )
+
+  base_static <- base_df %>%
+    select(-time_to_HIV, -HIV_status)
+
+  final_df <- left_join(tm, base_static, by = "PID")
+  assign(paste0("Base_Cyt_", label), final_df, envir = .GlobalEnv)
+}
+
+```
+
+```{r}
+process_tmerge(Base_n1, Cyt_n1, "n1")
+process_tmerge(Base_n2, Cyt_n2, "n2")
+process_tmerge(Base_n3, Cyt_n3, "n3")
+
+```
+
+```{r}
+Base_Cyt_n1_clean <- na.omit(Base_Cyt_n1)
+Base_Cyt_n2_clean <- na.omit(Base_Cyt_n2)
+Base_Cyt_n3_clean <- na.omit(Base_Cyt_n3)
+
+```
+
+```{r}
+Base_Cyt_n1_clean <- Base_Cyt_n1_clean %>% select(-time_to_HIV, -HIV_status)
+Base_Cyt_n2_clean <- Base_Cyt_n2_clean %>% select(-time_to_HIV, -HIV_status)
+Base_Cyt_n3_clean <- Base_Cyt_n3_clean %>% select(-time_to_HIV, -HIV_status)
+```
+
+## Introducing missingness (10%, 20%, 30%)
+## Scenarios: Baseline only, Cytokines only & both
+```{r}
+library(dplyr)
+
+# Function to introduce MAR missingness 
+introduce_controlled_missingness <- function(df, cols, prop_missing) {
+  df_missing <- df
+  
+  # Total number of rows and columns to apply missingness to
+  n_rows <- nrow(df_missing)
+  n_cols <- length(cols)
+  max_na_per_row <- floor(prop_missing * n_cols)
+  
+  for (i in 1:n_rows) {
+    # Randomly select how many values to make missing in this row
+    n_miss <- sample(0:max_na_per_row, 1)
+    
+    # Randomly choose the columns to set as NA
+    if (n_miss > 0) {
+      miss_cols <- sample(cols, n_miss)
+      df_missing[i, miss_cols] <- NA
+    }
+  }
+  return(df_missing)
+}
+
+
+# Identify baseline covariates (exclude IDs, time, event, cytokines)
+cyto_cols <- paste0("cyto", 1:20)
+exclude_cols <- c("PID", "tstart", "tstop", "event", cyto_cols)
+
+baseline_cols <- setdiff(names(Base_Cyt_n1_clean), exclude_cols)
+
+# Prepare list of missingness proportions
+missing_levels <- c(0.1, 0.2, 0.3)
+
+for (prop in missing_levels) {
+  prop_label <- paste0(as.integer(prop*100))
+  
+  # 1) Missingness in baseline covariates only
+  b_df <- introduce_controlled_missingness(Base_Cyt_n1_clean, baseline_cols, prop)
+  assign(paste0("bBase_Cyt_n1_", prop_label), b_df, envir = .GlobalEnv)
+  
+  # 2) Missingness in cytokines only
+  c_df <- introduce_controlled_missingness(Base_Cyt_n1_clean, cyto_cols, prop)
+  assign(paste0("cBase_Cyt_n1_", prop_label), c_df, envir = .GlobalEnv)
+  
+  # 3) Missingness in both baseline covariates and cytokines
+  cb_df <- introduce_controlled_missingness(Base_Cyt_n1_clean, 
+                                            c(baseline_cols, cyto_cols), prop)
+  assign(paste0("cbBase_Cyt_n1_", prop_label), cb_df, envir = .GlobalEnv)
+}
+
+```
+
+```{r}
+# the rest of the dataset
+for (dataset_num in 2:3) {
+  df_name <- paste0("Base_Cyt_n", dataset_num, "_clean")
+  df <- get(df_name)
+  
+  baseline_cols <- setdiff(names(df), 
+                           c("PID", "tstart", "tstop", "event", cyto_cols))
+  
+  for (prop in missing_levels) {
+    prop_label <- paste0(as.integer(prop*100))
+    
+    b_df <- introduce_controlled_missingness(df, baseline_cols, prop)
+    assign(paste0("bBase_Cyt_n", dataset_num, "_", prop_label), 
+           b_df, envir = .GlobalEnv)
+    
+    c_df <- introduce_controlled_missingness(df, cyto_cols, prop)
+    assign(paste0("cBase_Cyt_n", dataset_num, "_", prop_label), 
+           c_df, envir = .GlobalEnv)
+    
+    cb_df <- introduce_controlled_missingness(df, c(baseline_cols, cyto_cols), prop)
+    assign(paste0("cbBase_Cyt_n", dataset_num, "_", prop_label), 
+           cb_df, envir = .GlobalEnv)
+  }
+}
+
+```
+
+```{r}
+# List the created dataset with missingness 
+ls(pattern = "^[cb]?b?Base_Cyt_n[123]_\\d{2}$")
+
+```
+
+## Complete case analysis
+```{r}
+### Complete datasets wit NA removed
+# List of prefixes for missingness
+prefixes <- c("b", "c", "cb")
+
+# Levels of missingness
+levels <- c("10", "20", "30")
+
+# Datasets to loop over
+bases <- c("Base_Cyt_n1", "Base_Cyt_n2", "Base_Cyt_n3")
+
+# Loop through all combinations and apply na.omit
+for (base in bases) {
+  for (prefix in prefixes) {
+    for (level in levels) {
+      original_name <- paste0(prefix, base, "_", level)
+      complete_name <- paste0(original_name, "_comp")
+      
+      if (exists(original_name)) {
+        assign(complete_name, na.omit(get(original_name)))
+      } else {
+        warning(paste("Dataset", original_name, "does not exist."))
+      }
+    }
+  }
+}
+
+```
+
+```{r}
+ls(pattern = "_comp$")
+
+```
+
+```{r}
+### check the sample sizes 
+# Get all datasets ending in _comp (the complete datasets)
+complete_datasets <- ls(pattern = "_comp$")
+
+# Loop through each dataset and print the number of unique PIDs
+for (dataset_name in complete_datasets) {
+  dataset <- get(dataset_name)
+  
+  if ("PID" %in% names(dataset)) {
+    cat(dataset_name, "-> Unique PIDs:", length(unique(dataset$PID)), "\n")
+  } else {
+    cat(dataset_name, "-> PID column not found\n")
+  }
+}
+
+```
+
+### Time dependent Cox PH model without Frailty term
+```{r}
+
+datasets <- c(
+  "bBase_Cyt_n1_10_comp",  "bBase_Cyt_n1_20_comp",  "bBase_Cyt_n1_30_comp",
+  "bBase_Cyt_n2_10_comp",  "bBase_Cyt_n2_20_comp",  "bBase_Cyt_n2_30_comp",
+  "bBase_Cyt_n3_10_comp",  "bBase_Cyt_n3_20_comp",  "bBase_Cyt_n3_30_comp",
+  "cBase_Cyt_n1_10_comp",  "cBase_Cyt_n1_20_comp",  "cBase_Cyt_n1_30_comp",
+  "cBase_Cyt_n2_10_comp",  "cBase_Cyt_n2_20_comp",  "cBase_Cyt_n2_30_comp",
+  "cBase_Cyt_n3_10_comp",  "cBase_Cyt_n3_20_comp",  "cBase_Cyt_n3_30_comp",
+  "cbBase_Cyt_n1_10_comp", "cbBase_Cyt_n1_20_comp", "cbBase_Cyt_n1_30_comp",
+  "cbBase_Cyt_n2_10_comp", "cbBase_Cyt_n2_20_comp", "cbBase_Cyt_n2_30_comp",
+  "cbBase_Cyt_n3_10_comp", "cbBase_Cyt_n3_20_comp", "cbBase_Cyt_n3_30_comp"
+)
+
+# Store AIC results
+aic_results <- list()
+
+for (name in datasets) {
+  if (exists(name)) {
+    data <- get(name)
+    
+    # Skip datasets with 10 or fewer unique PIDs
+    if (length(unique(data$PID)) > 10) {
+      try({
+        model <- coxph(Surv(tstart, tstop, event) ~ ., data = data)
+        aic_results[[name]] <- AIC(model)
+      }, silent = TRUE)
+    }
+  }
+}
+
+# Print results
+print(aic_results)
+
+```
+
+### Time-dependent Cox PH model with Frailty term
+```{r}
+library(coxme)
+
+aic_results_coxme <- list()
+
+for (name in datasets) {
+  if (exists(name)) {
+    data <- get(name)
+    
+    if (length(unique(data$PID)) > 0) {
+      data$PID <- as.factor(data$PID)  # Ensure PID is factor
+      
+      # Prepare formula without tstart, tstop, event, PID as predictors
+      covars <- setdiff(names(data), c("tstart", "tstop", "event", "PID"))
+      formula <- as.formula(paste("Surv(tstart, tstop, event) ~", 
+                                  paste(covars, collapse = " + "), "+ (1 | PID)"))
+      
+      try({
+        fit <- coxme(formula, data = data, control = coxme.control(iter.max = 500))
+        aic_results_coxme[[paste0("coxme_", name)]] <- AIC(fit)
+      }, silent = TRUE)
+    }
+  }
+}
+
+print(aic_results_coxme)
+```
+
+## Imputation based analysis
+```{r}
+# Checking the sample size of merged datasets with introduced missingness
+# Get list of dataset names
+dataset_names <- ls(pattern = "^[cb]?b?Base_Cyt_n[123]_\\d{2}$")
+
+# Initialize list to store sample sizes
+pid_counts <- list()
+
+# Loop through datasets and count unique PID
+for (name in dataset_names) {
+  if (exists(name)) {
+    data <- get(name)
+    if ("PID" %in% names(data)) {
+      pid_counts[[name]] <- length(unique(data$PID))
+    } else {
+      pid_counts[[name]] <- NA  # PID column not found
+    }
+  }
+}
+
+# Print the number of unique PIDs per dataset
+print(pid_counts)
+
+```
+
+## Mice
+```{r}
+# Load required libraries
+library(mice)
+library(purrr)
+
+# List of datasets to impute
+dataset_names <- c(
+  "bBase_Cyt_n1_10",  "bBase_Cyt_n1_20",  "bBase_Cyt_n1_30",
+  "bBase_Cyt_n2_10",  "bBase_Cyt_n2_20",  "bBase_Cyt_n2_30",
+  "bBase_Cyt_n3_10",  "bBase_Cyt_n3_20",  "bBase_Cyt_n3_30",
+  "cBase_Cyt_n1_10",  "cBase_Cyt_n1_20",  "cBase_Cyt_n1_30",
+  "cBase_Cyt_n2_10",  "cBase_Cyt_n2_20",  "cBase_Cyt_n2_30",
+  "cBase_Cyt_n3_10",  "cBase_Cyt_n3_20",  "cBase_Cyt_n3_30",
+  "cbBase_Cyt_n1_10", "cbBase_Cyt_n1_20", "cbBase_Cyt_n1_30",
+  "cbBase_Cyt_n2_10", "cbBase_Cyt_n2_20", "cbBase_Cyt_n2_30",
+  "cbBase_Cyt_n3_10", "cbBase_Cyt_n3_20", "cbBase_Cyt_n3_30"
+)
+
+# Columns not to impute
+non_missing_vars <- c("tstart", "tstop")
+
+# Loop through each dataset
+for (name in data) {
+    if (exists(name)) {
+        df <- get(name)
+        df <- as.data.frame(df)
+        
+        # Step 1: Filter PIDs with enough variability and missing values
+        valid_pids <- df %>%
+            group_by(PID) %>%
+            filter(
+                n() > 1 &
+                    anyNA(across(-all_of(non_missing_vars))) &
+                    any(sapply(across(-all_of(non_missing_vars)), 
+                    function(x) length(unique(x[!is.na(x)])) > 1))
+            ) %>%
+            pull(PID) %>%
+            unique()
+        
+        df <- df %>% filter(PID %in% valid_pids)
+        
+        # Step 2: Grouped MICE by PID
+        mids_list <- df %>%
+            group_split(PID) %>%
+            lapply(function(sub_df) {
+                non_missing_data <- sub_df[non_missing_vars]
+                impute_data <- sub_df[setdiff(names(sub_df), non_missing_vars)]
+                
+                # Keep only varying columns
+                varying_cols <- impute_data[, sapply(impute_data, 
+                function(x) length(unique(x[!is.na(x)])) > 1), drop = FALSE]
+                
+                # Skip if no varying or missing data
+                if (ncol(varying_cols) == 0 || all(!is.na(varying_cols))) return(NULL)
+                
+                full_data <- cbind(non_missing_data, varying_cols)
+                
+                tryCatch(
+                    mice(full_data, m = 5, maxit = 10, seed = 123, 
+                         printFlag = FALSE),
+                    error = function(e) {
+                        warning(paste("Skipping PID:", unique(sub_df$PID), "-", e$message))
+                        return(NULL)
+                    }
+                )
+            })
+        
+        # Step 3: Build completed datasets for m = 1 to 5
+        for (i in 1:5) {
+            completed_df <- bind_rows(lapply(mids_list, function(mids_obj) {
+                if (inherits(mids_obj, "mids")) complete(mids_obj, i) else NULL
+            }))
+            
+            # Assign completed dataset
+            assign(paste0("mice_", name, "_", i), completed_df)
+        }
+        
+        cat(paste("✅ MICE imputed:", name, "→", paste0("mice_", name), "\n"))
+        
+    } else {
+        cat(paste("⚠️ Dataset not found:", name, "\n"))
+    }
+}
+
+```
+
+### Time dependent Cox PH model without frailty term
+```{r}
+# List of your original dataset base names
+dataset_names <- c(
+  "bBase_Cyt_n1_10",  "bBase_Cyt_n1_20",  "bBase_Cyt_n1_30",  "bBase_Cyt_n2_10",
+  "bBase_Cyt_n2_20",  "bBase_Cyt_n2_30",  "bBase_Cyt_n3_10",  "bBase_Cyt_n3_20",
+  "bBase_Cyt_n3_30",  "cBase_Cyt_n1_10",  "cBase_Cyt_n1_20",  "cBase_Cyt_n1_30",
+  "cBase_Cyt_n2_10",  "cBase_Cyt_n2_20",  "cBase_Cyt_n2_30",  "cBase_Cyt_n3_10",
+  "cBase_Cyt_n3_20",  "cBase_Cyt_n3_30",  "cbBase_Cyt_n1_10", "cbBase_Cyt_n1_20",
+  "cbBase_Cyt_n1_30", "cbBase_Cyt_n2_10", "cbBase_Cyt_n2_20", "cbBase_Cyt_n2_30",
+  "cbBase_Cyt_n3_10", "cbBase_Cyt_n3_20", "cbBase_Cyt_n3_30"
+)
+
+# Create empty list to store average AICs
+average_aic_results <- list()
+
+# Loop over each dataset
+for (name in dataset_names) {
+  # Get the mids object from your environment
+  mids_obj <- get(paste0("mice_", name))
+  
+  aic_list <- numeric(5)  # to store 5 AICs
+  
+  for (i in 1:5) {
+    # Get the completed dataset
+    completed_data <- complete(mids_obj, action = i)
+    
+    # Fit the time-dependent Cox model
+    fit <- try(coxph(Surv(tstart, tstop, event) ~ ., data = completed_data), 
+    silent = TRUE)
+    
+    # Extract AIC only if model fitted successfully
+    if (inherits(fit, "coxph")) {
+      aic_list[i] <- AIC(fit)
+    } else {
+      aic_list[i] <- NA
+    }
+  }
+  
+  # Compute average AIC across the 5 models
+  avg_aic <- mean(aic_list, na.rm = TRUE)
+  
+  # Store result with the dataset name
+  average_aic_results[[name]] <- avg_aic
+}
+
+# Convert to data.frame for nicer output
+average_aic_df <- data.frame(
+  Dataset = names(average_aic_results),
+  Avg_AIC = unlist(average_aic_results)
+)
+
+# View or export
+print(average_aic_df)
+
+```
+
+### Time dependent Cox PH model with Frailty term
+```{r}
+# List to store average AICs for each dataset
+frailty_AIC_results <- list()
+
+# Loop over each dataset
+for (name in dataset_names) {
+  mids_name <- paste0("mice_", name)
+  mids_obj <- get(mids_name)
+  
+  aic_list <- c()
+  
+  for (i in 1:5) {
+    data <- complete(mids_obj, action = i)
+    
+    # Prepare covariates excluding time/event/PID
+    covars2 <- setdiff(names(data), c("tstart", "tstop", "event", "PID"))
+    formula2 <- as.formula(paste("Surv(tstart, tstop, event) ~", 
+                                 paste(covars2, collapse = " + "), "+ (1 | PID)"))
+    
+    # Fit Cox model with frailty
+    fit2 <- coxme(formula2, data = data, control = coxme.control(iter.max = 200))
+    
+    # Store AIC
+    aic_list[i] <- AIC(fit2)
+  }
+  
+  # Average AIC across 5 imputations
+  frailty_AIC_results[[name]] <- mean(aic_list, na.rm = TRUE)
+}
+
+# Convert results to a dataframe for easy viewing
+frailty_AIC_df <- data.frame(
+  Dataset = names(frailty_AIC_results),
+  Avg_Frailty_AIC = unlist(frailty_AIC_results)
+)
+
+# View 
+print(frailty_AIC_df)
+```
+
+## MissForest 
+```{r}
+# Load required library
+library(missForest)
+library(doParallel)
+library(foreach)
+
+num_cores <- parallel::detectCores() - 1
+cl <- makeCluster(num_cores)
+registerDoParallel(cl)
+
+# List of datasets to impute
+dataset_names1 <- c(
+  "bBase_Cyt_n1_10",  "bBase_Cyt_n1_20",  "bBase_Cyt_n1_30",  "bBase_Cyt_n2_10",
+  "bBase_Cyt_n2_20",  "bBase_Cyt_n2_30",  "bBase_Cyt_n3_10",  "bBase_Cyt_n3_20",
+  "bBase_Cyt_n3_30",  "cBase_Cyt_n1_10",  "cBase_Cyt_n1_20",  "cBase_Cyt_n1_30",
+  "cBase_Cyt_n2_10",  "cBase_Cyt_n2_20",  "cBase_Cyt_n2_30",  "cBase_Cyt_n3_10",
+  "cBase_Cyt_n3_20",  "cBase_Cyt_n3_30",  "cbBase_Cyt_n1_10", "cbBase_Cyt_n1_20",
+  "cbBase_Cyt_n1_30", "cbBase_Cyt_n2_10", "cbBase_Cyt_n2_20", "cbBase_Cyt_n2_30",
+  "cbBase_Cyt_n3_10", "cbBase_Cyt_n3_20", "cbBase_Cyt_n3_30"
+)
+
+# Columns not to impute
+non_missing_vars <- c("tstart", "tstop")
+
+# Loop through datasets and apply missForest grouped by PID
+for (name in dataset_names1) {
+  if (exists(name)) {
+    df <- get(name)
+    df <- as.data.frame(df)
+
+    # ✅ Check that all non-missing columns exist
+    if (!all(non_missing_vars %in% names(df))) {
+      warning(paste("❌ One or more non-missing vars not found in", name, "- skipping.\n"))
+      next
+    }
+
+    # ✅ Identify valid PIDs before imputation
+    valid_pids <- df %>%
+      group_by(PID) %>%
+      group_map(~{
+        temp <- .x
+        vars_to_check <- setdiff(names(temp), non_missing_vars)
+
+        has_missing <- anyNA(temp[, vars_to_check, drop = FALSE])
+        has_variation <- any(sapply(temp[, vars_to_check, drop = FALSE], 
+                                    function(x) length(unique(x[!is.na(x)])) > 1))
+
+        if (nrow(temp) > 1 && has_missing && has_variation) {
+          return(unique(temp$PID))
+        } else {
+          return(NULL)
+        }
+      }) %>%
+      unlist() %>%
+      unique()
+
+    # Filter to only valid PIDs
+    df <- df %>% filter(PID %in% valid_pids)
+
+    if (nrow(df) == 0) {
+      warning(paste("⚠️ No valid PIDs found in", name, "- skipping.\n"))
+      next
+    }
+
+    # ✅ Group by PID and apply missForest
+    imputed_df <- df %>%
+      group_split(PID) %>%
+      lapply(function(sub_df) {
+        # Separate non-missing and imputed columns
+        non_missing_data <- sub_df[non_missing_vars]
+        impute_data <- sub_df[setdiff(names(sub_df), non_missing_vars)]
+
+        # Drop constant columns to avoid missForest errors
+        varying_cols <- impute_data[, sapply(impute_data, function(x) length(unique(x[!is.na(x)])) > 1), drop = FALSE]
+
+        # Skip if no columns to impute or no missing values
+        if (ncol(varying_cols) == 0 || all(!is.na(varying_cols))) {
+          return(cbind(non_missing_data, varying_cols))
+        }
+
+        # Run missForest
+        imputed_result <- tryCatch(
+          missForest(varying_cols, maxiter = 100, ntree = 500),
+          error = function(e) {
+            warning(paste("⚠️ Skipping PID:", unique(sub_df$PID), "-", e$message))
+            return(NULL)
+          }
+        )
+
+        if (is.null(imputed_result)) {
+          return(NULL)
+        } else {
+          return(cbind(non_missing_data, imputed_result$ximp))
+        }
+      }) %>%
+      bind_rows()
+
+    # Store the imputed dataset
+    assign(paste0(name, "_forest"), imputed_df)
+
+    cat(paste("✅ Grouped missForest imputed:", name, "→", paste0(name, "_forest"), "\n"))
+
+  } else {
+    cat(paste("⚠️ Dataset not found:", name, "\n"))
+  }
+}
+
+stopCluster(cl)
+```
+
+### Time dependent Cox PH model without frailty term
+```{r}
+aic_results_forest <- list()
+
+for (name in dataset_names1) {
+    dataset_names1 <- paste0(name, "_forest")
+    if (exists(dataset_names1)) {
+        data <- as.data.frame(get(dataset_names1))
+        
+        model <- try(coxph(Surv(tstart, tstop, event) ~ ., data = data), 
+        silent = TRUE)
+        
+        if (inherits(model, "try-error")) {
+            aic_results_forest[[name]] <- NA
+            cat("Model failed for:", dataset_names1, "\n")
+        } else {
+            aic_results_forest[[name]] <- AIC(model)
+        }
+    } else {
+        cat("Dataset not found:", dataset_names1, "\n")
+    }
+}
+
+print(aic_results_forest)
+```
+
+### Time dependent Cox PH model with frailty term
+```{r}
+aic_results_forest_frailty <- list()
+
+for (name in dataset_names1) {
+    dataset_names1 <- paste0(name, "_forest")
+    if (exists(dataset_names1)) {
+        data <- as.data.frame(get(dataset_names1))
+        
+        model <- try(coxme(formula2, data = data, 
+                           control = coxme.control(iter.max = 200)),
+                     silent = TRUE)
+        
+        if (inherits(model, "try-error")) {
+            aic_results_forest_frailty[[name]] <- NA
+            cat("Model failed for:", dataset_names1, "\n")
+        } else {
+            aic_results_forest_frailty[[name]] <- AIC(model)
+        }
+    } else {
+        cat("Dataset not found:", dataset_names1, "\n")
+    }
+}
+
+print(aic_results_forest_frailty)
+```
+
