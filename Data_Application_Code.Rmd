@@ -6,7 +6,7 @@ date: "`r Sys.Date()`"
 output: pdf_document
 ---
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
+knitr::opts_chunk$set(echo = TRUE)
 ```
 
 # A plot for proportion of missing variables
@@ -689,4 +689,5 @@ Imp_plot <- frame %>%
 ggsave("Imp_plot.pdf", plot = Imp_plot, width = 7, height = 4, 
        units = "in", dpi = 600, device = "pdf")
 ```
+
 
