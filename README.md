@@ -12,3 +12,5 @@ The data (CAP004) used for this analysis was obtained from CAPRISA (https://www.
 ## Authors
 Sarah Ogutu, Mohanad Mohammed, Henry Mwambi
 ## References
+## Code description
+The R markdown files (Data Application.Rmd, Simulation Study.Rmd) are provided, and they give a point-by-point step of how the analysis were achieved. 
